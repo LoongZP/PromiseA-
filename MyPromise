@@ -1,0 +1,330 @@
+const PENDING = "pending"; // 等待
+const FULFILLED = "fulfilled"; // 成功
+const REJECTED = "rejected"; // 失败
+
+class MyPromise {
+    PromiseState = PENDING; // 状态默认为pending等待
+    PromiseResult = undefined;
+    // onFulfilledCallbacks = []; 
+    // onRejectedCallbacks = []; 
+    constructor(executor) { // 接收一个执行器
+        Object.defineProperty(this, "onFulfilledCallbacks", { // 成功的回调函数
+            value: [],
+            writable: true,
+            configurable: false,
+            enumerable: false,
+        });
+        Object.defineProperty(this, "onRejectedCallbacks", { // 失败的回调函数
+            value: [],
+            writable: true,
+            configurable: false,
+            enumerable: false,
+        });
+
+        try {
+            executor(this.resolve.bind(this), this.reject.bind(this)); // 执行器会立即执行
+        } catch (e) {
+            this.reject(e); // 将错误原因传递给失败回调函数
+        }
+    }
+    resolve(value) { // value是成功之后的值
+        if (this.PromiseState === PENDING) {
+            this.PromiseState = FULFILLED; // 将状态改为成功
+            this.PromiseResult = value; // 将成功的值传递
+            this.onFulfilledCallbacks.forEach(callback => {
+                callback()
+            })
+        }
+    }
+
+    reject(reason) { // reason是失败之后的原因
+        if (this.PromiseState === PENDING) {
+            this.PromiseState = REJECTED; // 将状态改为失败
+            this.PromiseResult = reason; // 将失败的值传递
+            this.onRejectedCallbacks.forEach(callback => {
+                callback()
+            })
+        }
+    }
+
+    then(onFulfilled, onRejected) { // then方法有两个参数
+        let promise2 = new MyPromise((resolve, reject) => {
+            if (this.PromiseState === FULFILLED) { // 成功调用第一个回调函数
+                queueMicrotask(() => { // 变成异步代码，获取promise
+                    try {
+                        if (typeof onFulfilled !== "function") {
+                            // 2.2.7.3规范 如果 onFulfilled 不是函数且 promise1 成功执行， promise2 必须成功执行并返回相同的值
+                            resolve(this.PromiseResult);
+                            //直接传到下一轮，不在当前解决争议
+                        } else {
+                            let result = onFulfilled(this.PromiseResult);
+                            ResolvePromise(promise2, result, resolve, reject); // 调用方法
+                        }
+                    } catch (e) {
+                        reject(e); // 将错误传递到下一个then中
+                    }
+                })
+            } else if (this.PromiseState === REJECTED) { // 失败调用第二个回调函数
+                queueMicrotask(() => {
+                    try {
+                        if (typeof onRejected !== "function") {
+                            reject(this.PromiseResult);
+                        } else {
+                            let result = onRejected(this.PromiseResult);
+                            ResolvePromise(promise2, result, resolve, reject);
+                        }
+                    } catch (e) {
+                        reject(e); // 传递错误
+                    }
+                })
+            } else { // 当状态为等待时，将成功回调和失败回调存储起来
+                this.onFulfilledCallbacks.push(() => { // 为数组添加成功回调函数
+                    queueMicrotask(() => { // 变成异步代码，获取promise
+                        try {
+                            if (typeof onFulfilled !== "function") {
+                                // 2.2.7.3规范 如果 onFulfilled 不是函数且 promise1 成功执行， promise2 必须成功执行并返回相同的值
+                                resolve(this.PromiseResult);
+                            } else {
+                                let result = onFulfilled(this.PromiseResult);
+                                ResolvePromise(promise2, result, resolve, reject); // 调用方法
+                            }
+                        } catch (e) {
+                            reject(e); // 将错误传递到下一个then中
+                        }
+                    })
+                });
+                this.onRejectedCallbacks.push(() => { // 为数组添加失败回调函数
+                    queueMicrotask(() => {
+                        try {
+                            if (typeof onRejected !== "function") {
+                                reject(this.PromiseResult);
+                            } else {
+                                let result = onRejected(this.PromiseResult);
+                                ResolvePromise(promise2, result, resolve, reject);
+                            }
+                        } catch (e) {
+                            reject(e); // 传递错误
+                        }
+                    })
+                });
+            }
+        })
+        return promise2;
+    }
+
+    finally(callBack) {
+        return this.then(callBack, callBack)
+        // return this.then(value => {
+        //     return MyPromise.resolve(callBack()).then(() => value);
+        // }, reason => {
+        //     return MyPromise.resolve(callBack()).then(() => { throw reason });
+        // })
+    }
+
+    catch(onRejected) {
+        return this.then(undefined, onRejected);
+    }
+
+
+    static resolve(value) {
+        if (value instanceof MyPromise)
+            return value;
+        else if (value instanceof Object && 'then' in value)
+            // 如果这个值是thenable（即带有`"then" `方法），
+            // 返回的promise会“跟随”这个thenable的对象，采用它的最终状态；
+            return new MyPromise((resolve, reject) => {
+                value.then(resolve, reject);
+            })
+        return new MyPromise(resolve => resolve(value));
+    }
+    static reject(reason) {
+        return new MyPromise((resolve, reject) => {
+            reject(reason);
+        })
+    }
+
+
+    static race(promises) {
+        return new MyPromise((resolve, reject) => {
+            if (isIterable(promises)) {
+                // 如果迭代对象没有任何值，则不改变状态，原生Promise就是这样
+                for (let promise of promises) {
+                    MyPromise.resolve(promise).then(resolve, reject);
+                }
+            } else {
+                return reject(new TypeError(`${promises} is not iterable (cannot read property Symbol(Symbol.iterator))`))
+            }
+        })
+    }
+
+    static all(promises) {
+        return new MyPromise((resolve, reject) => {
+            if (isIterable(promises)) {
+                let result = []; // 结果数组，用来存放结果
+                let count = 0; // 计数器，记录resolve的个数
+
+                let index = 0  //记录迭代器有多少个元素
+                // 如果迭代对象没有任何值，则不改变状态，原生Promise就是这样
+                for (let item of promises) {
+                    let curIndex = index++
+                    MyPromise.resolve(item).then(
+                        value => {
+                            result[curIndex] = value;
+                            count++;
+                            if (count === index)
+                                resolve(result);
+                        },
+                        reason => {
+                            reject(reason)
+                        }
+                    )
+                }
+                // 如果传入的参数是一个空的可迭代对象，则返回一个已完成（already resolved）状态的 Promise
+                if (index === 0) {
+                    resolve(result);
+                }
+            } else {
+                return reject(new TypeError(`${promises} is not iterable (cannot read property Symbol(Symbol.iterator))`))
+            }
+        })
+    }
+
+    static allSettled(promises) {
+        return new MyPromise((resolve, reject) => {
+            if (isIterable(promises)) {
+                let result = []; // 结果数组，用来存放结果
+                let count = 0; // 计数器，记录是否执行完成 resolve/rejected
+
+                let index = 0 //记录迭代器有多少个元素
+                for (let item of promises) {
+                    let curIndex = index++  // 这是第几个元素
+                    MyPromise.resolve(item).then(
+                        value => {
+                            count++;
+                            result[curIndex] = {
+                                status: 'fulfilled',
+                                value
+                            };
+                            if (count === index)
+                                resolve(result);
+                        },
+                        reason => {
+                            count++;
+                            result[index] = {
+                                status: 'rejected',
+                                reason
+                            };
+                            if (count === index)
+                                resolve(result);
+                        }
+                    )
+                }
+                // 如果传入的参数是一个空的可迭代对象，则返回一个已完成（already resolved）状态的 Promise
+                if (index === 0) {
+                    resolve(result);
+                }
+            } else {
+                return reject(new TypeError(`${promises} is not iterable (cannot read property Symbol(Symbol.iterator))`))
+            }
+        })
+    }
+
+    static any(promises) {
+        return new MyPromise((resolve, reject) => {
+            if (isIterable(promises)) {
+                let errors = []; // 结果数组，用来存放reject结果
+                let count = 0; // 计数器，记录是否执行完成
+                // 如果传入的参数是一个空的可迭代对象，则返回一个已完成（already resolved）状态的 Promise
+
+                let index = 0 //记录迭代器有多少个元素
+                for (let item of promises) {
+                    let curIndex = index++
+                    MyPromise.resolve(item).then(
+                        value => {
+                            // 只要其中的一个 promise 成功，就返回那个已经成功的 promise 
+                            resolve(value);
+                        },
+                        reason => {
+                            errors[curIndex] = reason
+                            count++;
+                            if (count === index)
+                                reject(new AggregateError(errors, 'All promises were rejected'));
+                        }
+                    )
+                }
+                if (index === 0) {
+                    let e = new AggregateError(errors, 'All promises were rejected')
+                    reject(e.toString())
+                }
+            } else {
+                return reject(new TypeError(`${promises} is not iterable (cannot read property Symbol(Symbol.iterator))`))
+            }
+        })
+    }
+}
+function ResolvePromise(promise2, x, resolve, reject) {
+    if (promise2 === x) { // 如果相同，报错
+        throw new TypeError("promise对象循环了")
+    }
+    // 通过判断result是不是my promise的实例对象来判断是不是promise对象
+    if (x instanceof MyPromise) { // 是Promise对象
+        // 调用then方法查看Promise对象的状态
+        // 如果成功调用第一个回调函数，如果失败调用第二个回调函数
+        x.then(y => {
+            ResolvePromise(promise2, y, resolve, reject)
+        }, reject);
+    }
+    else if (x !== null && ((typeof x === 'object' || (typeof x === 'function')))) {
+        try {
+            var then = x.then
+        } catch (e) {
+            return reject(e);
+        }
+        if (typeof then === "function") {
+            let called = false; // 避免then函数内部多次调用，因为这里的then不是Promise
+            try {
+                then.call(
+                    x,
+                    // 2.3.3.3.1 如果 resolvePromise 以值 y 为参数被调用，则运行 [[Resolve]](promise, y)
+                    y => {
+                        if (called) return;
+                        called = true;
+                        ResolvePromise(promise2, y, resolve, reject);
+                    },
+                    // 2.3.3.3.2 如果 rejectPromise 以据因 r 为参数被调用，则以据因 r 拒绝 promise
+                    r => {
+                        if (called) return;
+                        called = true;
+                        reject(r);
+                    }
+                )
+            } catch (e) {
+                if (called) return;
+                // called = true;
+                // 2.3.3.3.4.2 否则以 e 为据因拒绝 promise
+                reject(e);
+            }
+        } else {
+            // 2.3.3.4 如果 then 不是函数，以 x 为参数执行 promise
+            resolve(x);
+        }
+    }
+    else { // 如果是普通值
+        return resolve(x); // 直接将普通值传递
+    }
+}
+
+const isIterable = obj => obj != null && typeof obj[Symbol.iterator] === 'function';
+
+
+
+MyPromise.deferred = function () {
+    let result = {};
+    result.promise = new MyPromise((resolve, reject) => {
+        result.resolve = resolve;
+        result.reject = reject;
+    });
+    return result;
+}
+
+module.exports = MyPromise;
